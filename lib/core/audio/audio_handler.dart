@@ -315,11 +315,12 @@ class LxAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler {
     queue.add(List.from(_queue));
 
     // 使用 ConcatenatingAudioSource 更好地支持切歌和随机播放
+    // 注意：不能用 about:blank 占位，Android ExoPlayer 不支持 about: 协议
+    const silentPlaceholder = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=';
     final playlist = ConcatenatingAudioSource(
       children: items.map((item) {
         final url = item.extras?['url'] ?? '';
-        // 如果有 URL 则直接使用，否则先占位，播放时动态解析
-        return AudioSource.uri(Uri.parse(url.isEmpty ? 'about:blank' : url), tag: item);
+        return AudioSource.uri(Uri.parse(url.isEmpty ? silentPlaceholder : url), tag: item);
       }).toList(),
     );
 
@@ -355,7 +356,8 @@ class LxAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler {
       await source.clear();
       await source.addAll(newQueue.map((item) {
         final url = item.extras?['url'] ?? '';
-        return AudioSource.uri(Uri.parse(url.isEmpty ? 'about:blank' : url), tag: item);
+        const silentPlaceholder = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=';
+        return AudioSource.uri(Uri.parse(url.isEmpty ? silentPlaceholder : url), tag: item);
       }).toList());
       
       // 如果原来的播放项还在，尝试恢复索引
@@ -376,8 +378,9 @@ class LxAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler {
     if (_player.audioSource is ConcatenatingAudioSource) {
       final source = _player.audioSource as ConcatenatingAudioSource;
       final url = mediaItem.extras?['url'] ?? '';
+      const silentPlaceholder = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=';
       await source.add(AudioSource.uri(
-        Uri.parse(url.isEmpty ? 'about:blank' : url), 
+        Uri.parse(url.isEmpty ? silentPlaceholder : url), 
         tag: mediaItem
       ));
     }

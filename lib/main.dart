@@ -50,10 +50,12 @@ void main() async {
     
     // 设置 URL 解析器：当 AudioHandler 需要播放某首歌但没有 URL 时调用
     lxHandler.urlResolver = (mediaId) async {
+      debugPrint('[urlResolver] 开始解析: mediaId=$mediaId');
       // 从当前播放项中获取原始 MusicItem 信息
       final currentItem = lxHandler.mediaItem.value;
       if (currentItem != null && currentItem.extras != null) {
         final musicItem = MusicItem.fromJson(currentItem.extras!);
+        debugPrint('[urlResolver] 歌曲信息: platform=${musicItem.platform}, source=${musicItem.source}, songmid=${musicItem.songmid}');
         final qualityOption = container.read(audioQualityProvider);
         const qualityMap = {
           AudioQualityOption.low: '128k',
@@ -61,8 +63,11 @@ void main() async {
           AudioQualityOption.high: '320k',
           AudioQualityOption.lossless: 'flac',
         };
-        return await sourceService.getPlayUrl(musicItem, quality: qualityMap[qualityOption] ?? '128k');
+        final url = await sourceService.getPlayUrl(musicItem, quality: qualityMap[qualityOption] ?? '128k');
+        debugPrint('[urlResolver] 解析结果: ${url != null ? "成功(${url.substring(0, url.length > 50 ? 50 : url.length)}...)" : "null"}');
+        return url;
       }
+      debugPrint('[urlResolver] 无法获取歌曲信息: currentItem=${currentItem != null}');
       return null;
     };
 

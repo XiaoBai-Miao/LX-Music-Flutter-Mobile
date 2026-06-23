@@ -6,6 +6,12 @@ import 'music_platform.dart';
 import 'source_utils.dart';
 import 'wbd_crypto.dart';
 
+class _KwToken {
+  final String name;
+  final String value;
+  _KwToken({required this.name, required this.value});
+}
+
 class KwSource extends MusicPlatform {
   @override
   String get id => 'kw';
@@ -151,85 +157,154 @@ class KwSource extends MusicPlatform {
     }
   }
 
+  // 从首页提取 CSRF token（Kuwo 改用 Hm_Iuvt_* cookie）
+  Future<_KwToken?> _fetchKwToken() async {
+    try {
+      final dio = createDioForService(headers: {
+        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1',
+      });
+      final response = await dio.get(
+        'https://www.kuwo.cn/',
+        options: Options(responseType: ResponseType.plain),
+      ).timeout(const Duration(seconds: 8));
+      final body = response.data?.toString() ?? '';
+      // 从 Set-Cookie 中提取 Hm_Iuvt_* cookie
+      if (response.headers.map['set-cookie'] != null) {
+        for (final cookie in response.headers.map['set-cookie']!) {
+          debugPrint('[KW] Cookie: $cookie');
+          final cookieMatch = RegExp(r'(Hm_Iuvt_\w+)=([^;]+)').firstMatch(cookie);
+          if (cookieMatch != null) {
+            final name = cookieMatch.group(1)!;
+            final value = cookieMatch.group(2)!;
+            debugPrint('[KW] 提取 CSRF: $name=$value');
+            return _KwToken(name: name, value: value);
+          }
+        }
+      }
+      // 兜底从 body 搜 Hm_Iuvt
+      final idx = body.indexOf('Hm_Iuvt');
+      if (idx >= 0) {
+        debugPrint('[KW] 页面中找到 Hm_Iuvt, 上下文: ${body.substring(idx, (idx + 100).clamp(0, body.length))}');
+      }
+      debugPrint('[KW] 未能提取 CSRF token, body length=${body.length}');
+      return null;
+    } catch (e) {
+      debugPrint('[KW] 获取 CSRF token 失败: $e');
+      return null;
+    }
+  }
+
   @override
   Future<String?> getMusicUrl(MusicItem music, {String quality = '128k'}) async {
     final rid = music.songmid ?? music.id;
+    debugPrint('[KW] getMusicUrl: rid=$rid, quality=$quality');
 
-    // 方案1: kuwo.cn H5 接口
+    // 方案1: kuwo.cn H5 接口（需先获取 csrf token）
     try {
-      final urlDio = createDioForService(headers: {
-        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1',
-        'Referer': 'https://www.kuwo.cn/',
-        'Cookie': 'kw_token=',
-        'csrf': 'kw_token',
-      });
+      final kwToken = await _fetchKwToken();
+      if (kwToken != null) {
+        final urlDio = createDioForService(headers: {
+          'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1',
+          'Referer': 'https://www.kuwo.cn/',
+          'Cookie': '${kwToken.name}=${kwToken.value}',
+          'csrf': kwToken.value,
+        });
 
-      final response = await urlDio.get(
-        'https://www.kuwo.cn/api/v1/www/music/playInfo',
-        queryParameters: {
-          'mid': rid,
-          'type': _qualityToType(quality),
-          'httpsStatus': '1',
-          'reqId': DateTime.now().millisecondsSinceEpoch.toString(),
-        },
-      ).timeout(const Duration(seconds: 8));
+        final response = await urlDio.get(
+          'https://www.kuwo.cn/api/v1/www/music/playInfo',
+          queryParameters: {
+            'mid': rid,
+            'type': _qualityToType(quality),
+            'httpsStatus': '1',
+            'reqId': DateTime.now().millisecondsSinceEpoch.toString(),
+          },
+        ).timeout(const Duration(seconds: 8));
 
-      final data = response.data;
-      if (data is Map && data['code'] == 200) {
-        final url = data['data']?['url'] as String?;
-        if (url != null && url.isNotEmpty) return url;
+        debugPrint('[KW] playInfo 接口: status=${response.statusCode}');
+        final data = response.data;
+        if (data is Map && data['code'] == 200) {
+          final url = data['data']?['url'] as String?;
+          if (url != null && url.isNotEmpty) {
+            debugPrint('[KW] playInfo 接口成功: $url');
+            return url;
+          }
+          debugPrint('[KW] playInfo 接口: url为空, code=${data["code"]}');
+        } else {
+          debugPrint('[KW] playInfo 接口: 非期望响应, success=${data is Map ? data["success"] : "N/A"}');
+        }
+      } else {
+        debugPrint('[KW] playInfo 接口: 无 csrf token, 跳过');
       }
     } catch (e) {
       debugPrint('[KW] playInfo 接口失败: $e');
     }
 
-    // 方案2: antiserver 接口
-    try {
-      final urlDio = createDioForService(headers: {
-        'User-Agent': 'okhttp/3.10.0',
-      });
+    // 方案2: antiserver 接口（返回纯文本 URL），分别尝试两种 rid 格式
+    for (final ridFormat in ['MUSIC_$rid', rid]) {
+      try {
+        final urlDio = createDioForService(headers: {
+          'User-Agent': 'okhttp/3.10.0',
+        });
 
-      final response = await urlDio.get(
-        'http://antiserver.kuwo.cn/anti.s',
-        queryParameters: {
-          'type': 'convert_url',
-          'rid': 'MUSIC_$rid',
-          'format': _qualityToFormat(quality),
-          'response': 'url',
-        },
-      ).timeout(const Duration(seconds: 8));
+        final response = await urlDio.get(
+          'http://antiserver.kuwo.cn/anti.s',
+          queryParameters: {
+            'type': 'convert_url',
+            'rid': ridFormat,
+            'format': _qualityToFormat(quality),
+            'response': 'url',
+          },
+          options: Options(responseType: ResponseType.plain),
+        ).timeout(const Duration(seconds: 8));
 
-      final String url = response.data?.toString().trim() ?? '';
-      if (url.startsWith('http')) return url;
-    } catch (e) {
-      debugPrint('[KW] antiserver 接口失败: $e');
-    }
-
-    // 方案3: 旧版 convert_url3 接口
-    try {
-      final urlDio = createDioForService(headers: {
-        'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36',
-        'Referer': 'http://www.kuwo.cn/',
-      });
-
-      final response = await urlDio.get(
-        'http://www.kuwo.cn/url',
-        queryParameters: {
-          'format': _qualityToFormat(quality),
-          'rid': 'MUSIC_$rid',
-          'response': 'url',
-          'type': 'convert_url3',
-        },
-      );
-
-      final data = response.data;
-      if (data is Map && data['url'] != null) {
-        return data['url'] as String;
+        debugPrint('[KW] antiserver 接口(rid=$ridFormat): status=${response.statusCode}, data=$response.data');
+        String url = response.data?.toString().trim() ?? '';
+        // 去掉末尾的 .data 后缀（Android ExoPlayer 不识别 .data 扩展名）
+        if (url.endsWith('.data')) {
+          url = url.substring(0, url.length - 5);
+        }
+        if (url.startsWith('http')) {
+          debugPrint('[KW] antiserver 接口(rid=$ridFormat)成功: $url');
+          return url;
+        }
+        debugPrint('[KW] antiserver 接口(rid=$ridFormat): 返回非 URL 内容: "$url"');
+      } catch (e) {
+        debugPrint('[KW] antiserver 接口(rid=$ridFormat)失败: $e');
       }
-    } catch (e) {
-      debugPrint('[KW] convert_url3 接口失败: $e');
     }
 
+    // 方案3: 旧版 convert_url3 接口，分别尝试两种 rid 格式
+    for (final ridFormat in ['MUSIC_$rid', rid]) {
+      try {
+        final urlDio = createDioForService(headers: {
+          'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36',
+          'Referer': 'http://www.kuwo.cn/',
+        });
+
+        final response = await urlDio.get(
+          'http://www.kuwo.cn/url',
+          queryParameters: {
+            'format': _qualityToFormat(quality),
+            'rid': ridFormat,
+            'response': 'url',
+            'type': 'convert_url3',
+          },
+        );
+
+        debugPrint('[KW] convert_url3 接口(rid=$ridFormat): status=${response.statusCode}, data=$response.data');
+        final data = response.data;
+        if (data is Map && data['url'] != null) {
+          final url = data['url'] as String;
+          debugPrint('[KW] convert_url3 接口(rid=$ridFormat)成功: $url');
+          return url;
+        }
+        debugPrint('[KW] convert_url3 接口: 非期望响应, type=${data.runtimeType}');
+      } catch (e) {
+        debugPrint('[KW] convert_url3 接口(rid=$ridFormat)失败: $e');
+      }
+    }
+
+    debugPrint('[KW] getMusicUrl: 所有接口均失败, 返回 null');
     return null;
   }
 

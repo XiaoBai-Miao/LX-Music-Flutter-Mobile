@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_js/flutter_js.dart';
 import 'package:dio/dio.dart';
+import 'package:dio/io.dart';
 import 'package:crypto/crypto.dart';
 import 'package:uuid/uuid.dart';
 import 'package:encrypt/encrypt.dart' as encrypt_lib;
@@ -16,8 +17,9 @@ dynamic _decodeDynamic(String s) => json.decode(s);
 
 class CustomSourceEngine {
   JavascriptRuntime? _runtime;
-  final Dio _dio = Dio();
+  late final Dio _dio;
   CustomSource? _currentSource;
+  int _requestCounter = 0; // 调试计数器
   bool _initialized = false;
   final _uuid = const Uuid();
   final StreamController<Map<String, dynamic>> _eventController = StreamController<Map<String, dynamic>>.broadcast();
@@ -27,8 +29,26 @@ class CustomSourceEngine {
   Completer<void>? _initCompleter;
 
   CustomSourceEngine() {
-    // 延迟初始化，避免在构造函数中阻塞 UI 线程
-    // _initRuntime(); 
+    _dio = Dio(BaseOptions(
+      connectTimeout: const Duration(seconds: 10),
+      receiveTimeout: const Duration(seconds: 15),
+    ));
+    // 禁用证书校验（兼容自签证书和部分 HTTP 源）
+    try {
+      (_dio.httpClientAdapter as IOHttpClientAdapter).createHttpClient = () {
+        final client = HttpClient()
+          ..badCertificateCallback = (cert, host, port) => true;
+        return client;
+      };
+    } catch (_) {
+      // Dio 5.x 某些版本适配器类型不同
+      try {
+        _dio.httpClientAdapter = IOHttpClientAdapter(
+          createHttpClient: () => HttpClient()
+            ..badCertificateCallback = (cert, host, port) => true,
+        );
+      } catch (_) {}
+    }
   }
 
   Stream<Map<String, dynamic>> get eventStream => _eventController.stream;
@@ -166,6 +186,12 @@ class CustomSourceEngine {
       final String url = data['url'];
       final Map<String, dynamic> options = data['options'] ?? {};
       _requestUrls[callbackId] = url; // 记录 URL 用于调试
+      final reqId = ++_requestCounter;
+
+      debugPrint('[lx_request#$reqId] 请求: $url');
+      if (options['headers'] != null) {
+        debugPrint('[lx_request#$reqId] Headers: ${options['headers']}');
+      }
 
       try {
         final isBinary = options['binary'] == true;
@@ -183,11 +209,15 @@ class CustomSourceEngine {
           queryParams: queryParams
         );
         
+        debugPrint('[lx_request#$reqId] 响应: status=${response.statusCode}');
+
         dynamic body;
         if (isBinary) {
           body = base64Encode(response.data as List<int>);
         } else {
           body = response.data;
+          final bodyPreview = body is String ? body.substring(0, body.length > 200 ? 200 : body.length) : body?.toString().substring(0, 200);
+          debugPrint('[lx_request#$reqId] Body(前200): $bodyPreview');
           // 优化 JSON 自动解析逻辑
           final contentType = response.headers.value('content-type')?.toLowerCase() ?? '';
           if (options['json'] == true || contentType.contains('application/json') || (body is String && body.trim().startsWith('{'))) {
@@ -222,6 +252,7 @@ class CustomSourceEngine {
           body // 桌面版支持第三个参数直接传 body
         ], url: url);
       } catch (e) {
+        debugPrint('[lx_request#$reqId] 错误: $e');
         _executeJsCallback(callbackId, [e.toString(), null, null], url: url);
       }
     });
@@ -939,21 +970,35 @@ class CustomSourceEngine {
     // 但 await handlers[i](params) 内部创建的 Promise 不会自动 resolve。
     // 立刻 flush microtask，让同步分支（无 HTTP 请求的 handler）能直接
     // 发出 lx_response，避免不必要的 15 秒等待。
+    // 对于 Android QuickJS，一次 flush 不够（Promise 链需要多次事件循环），
+    // 使用轮询方式每 500ms flush 一次，直到 completer 完成或超时。
     _flushMicrotasks();
-    
-    try {
-      final result = await completer.future.timeout(const Duration(seconds: 15));
-      return result;
-    } on TimeoutException {
-      _pendingRequests.remove(reqId);
-      final errMsg = '请求超时(15s): ${params['action']}';
-      _eventController.add({'type': 'error', 'message': errMsg});
-      return null;
-    } catch (e) {
-      _pendingRequests.remove(reqId);
-      _eventController.add({'type': 'error', 'message': '请求失败: $e'});
-      return null;
+
+    final deadline = DateTime.now().add(const Duration(seconds: 15));
+    while (!completer.isCompleted && DateTime.now().isBefore(deadline)) {
+      _flushMicrotasks(maxIterations: 4);
+      try {
+        final result = await completer.future.timeout(const Duration(milliseconds: 500));
+        return result;
+      } on TimeoutException {
+        // 继续轮询
+      } catch (e) {
+        _pendingRequests.remove(reqId);
+        if (e is TimeoutException) {
+          final errMsg = '请求超时(15s): ${params['action']}';
+          _eventController.add({'type': 'error', 'message': errMsg});
+        } else {
+          _eventController.add({'type': 'error', 'message': '请求失败: $e'});
+        }
+        return null;
+      }
     }
+
+    // 超时
+    _pendingRequests.remove(reqId);
+    final errMsg = '请求超时(15s): ${params['action']}';
+    _eventController.add({'type': 'error', 'message': errMsg});
+    return null;
   }
 
   Future<List<MusicItem>> search(String keyword, {String? source, int page = 1, int limit = 20, String type = 'music'}) async {

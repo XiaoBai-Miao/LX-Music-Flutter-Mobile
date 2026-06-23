@@ -59,7 +59,7 @@ class PlayerService {
       title: song.name,
       artist: song.singer,
       duration: song.duration,
-      artUri: Uri.tryParse(song.artwork ?? ''),
+      artUri: (song.artwork != null && song.artwork!.isNotEmpty) ? Uri.parse(song.artwork!) : null,
       extras: song.toJson(), // 核心：将完整数据带入 AudioHandler，供解析器使用
     );
   }

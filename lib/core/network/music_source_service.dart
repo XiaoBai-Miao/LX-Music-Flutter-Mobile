@@ -92,27 +92,46 @@ class MusicSourceService {
   }
 
   Future<String?> getPlayUrl(MusicItem music, {String quality = '128k'}) async {
-    // 1. 优先尝试自定义源
+    debugPrint('[getPlayUrl] 开始解析: platform=${music.platform}, source=${music.source}, songmid=${music.songmid}');
+
+    // 1. 优先尝试自定义源（加超时防止卡死）
     final enabledSources = _customSourceService.enabledSources;
+    debugPrint('[getPlayUrl] 自定义源数量: ${enabledSources.length}');
     for (final source in enabledSources) {
+      debugPrint('[getPlayUrl] 尝试自定义源: ${source.id}');
       final url = await _customSourceService.getMusicUrl(source.id, music)
+          .timeout(const Duration(seconds: 16), onTimeout: () {
+            debugPrint('[getPlayUrl] 自定义源 ${source.id} 超时(16s)');
+            return null;
+          })
           .catchError((e) {
+            debugPrint('[getPlayUrl] 自定义源 ${source.id} 错误: $e');
         return null;
       });
       if (url != null && url.isNotEmpty) {
+        debugPrint('[getPlayUrl] 自定义源 ${source.id} 成功: ${url.substring(0, url.length > 50 ? 50 : url.length)}');
         return url;
       }
+      debugPrint('[getPlayUrl] 自定义源 ${source.id} 返回空');
     }
 
     // 2. 如果自定义源失败，回退到内置源（主平台）
     final platform = music.platform.isNotEmpty ? music.platform : music.source;
+    debugPrint('[getPlayUrl] 回退到内置源: platform=$platform');
     if (platform.isNotEmpty && platform != 'custom' && platform != 'test') {
-      final url = await _builtInSources.getMusicUrl(platform, music, quality: quality);
+      final url = await _builtInSources.getMusicUrl(platform, music, quality: quality)
+          .timeout(const Duration(seconds: 8), onTimeout: () {
+            debugPrint('[getPlayUrl] 内置源 $platform 超时(8s)');
+            return null;
+          });
       if (url != null) {
+        debugPrint('[getPlayUrl] 内置源 $platform 成功: ${url.substring(0, url.length > 50 ? 50 : url.length)}');
         return url;
       }
+      debugPrint('[getPlayUrl] 内置源 $platform 返回空');
     }
 
+    debugPrint('[getPlayUrl] 所有源均失败');
     return null;
   }
 
