@@ -4,6 +4,13 @@
 
 ## 功能特性
 
+![1.png](./docs/1.png)
+![2.png](docs/2.png)
+![3.png](docs/3.png)
+![4.png](docs/4.png)
+![5.png](docs/5.png)
+![6.png](docs/6.png)
+
 ### 核心功能
 - ✅ 音乐搜索（酷我/酷狗/咪咕）
 - ✅ 音频播放（播放/暂停/上下首）
