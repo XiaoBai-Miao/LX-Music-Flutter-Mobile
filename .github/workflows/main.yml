@@ -1,0 +1,39 @@
+name: Build iOS IPA (Unsigned)
+
+on:
+  workflow_dispatch: # 允许手动触发测试
+
+jobs:
+  build-ios:
+    runs-on: macos-latest # 必须使用 macOS 环境
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # 设置 Flutter 环境
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+
+      # 安装项目依赖
+      - name: Install dependencies
+        run: |
+          flutter pub get
+          # 针对 iOS 项目，通常需要进入 ios 目录安装 CocoaPods 依赖
+          cd ios
+          pod install
+          cd ..
+
+      # 编译未签名的 ipa
+      # --no-codesign 参数允许在没有配置 Apple 证书的情况下完成编译
+      - name: Build IPA
+        run: flutter build ipa --release --no-codesign
+
+      # 将生成的构建产物上传到 GitHub Artifacts
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-build-output
+          path: build/ios/archive/Runner.xcarchive
