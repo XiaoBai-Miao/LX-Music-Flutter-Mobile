@@ -1,39 +1,72 @@
-name: Build iOS IPA (Unsigned)
+name: Build iOS Archive & IPA
 
 on:
-  workflow_dispatch: # 允许手动触发测试
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch: # 允许手动点击运行
 
 jobs:
   build-ios:
-    runs-on: macos-latest # 必须使用 macOS 环境
+    runs-on: macos-latest # 必须使用 macOS 虚拟环境
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # 设置 Flutter 环境
+      - name: Set up Ruby (for CocoaPods)
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.2'
+          bundler-cache: true
+
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
           channel: 'stable'
 
-      # 安装项目依赖
-      - name: Install dependencies
+      - name: Install Flutter dependencies
+        run: flutter pub get
+
+      - name: Install Pods
         run: |
-          flutter pub get
-          # 针对 iOS 项目，通常需要进入 ios 目录安装 CocoaPods 依赖
           cd ios
-          pod install
+          pod install --repo-update
           cd ..
 
-      # 编译未签名的 ipa
-      # --no-codesign 参数允许在没有配置 Apple 证书的情况下完成编译
-      - name: Build IPA
+      # 解决部分 Swift 依赖包解析超时或失败的问题
+      - name: Resolve Swift Package Dependencies
+        run: xcodebuild -resolvePackageDependencies -workspace ios/Runner.xcworkspace -scheme Runner
+
+      # 1. 编译未签名的 Xcode Archive（原始输出，用于后续本地手动重签名分发）
+      - name: Build Xcode Archive
         run: flutter build ipa --release --no-codesign
 
-      # 将生成的构建产物上传到 GitHub Artifacts
-      - name: Upload Artifact
+      # 2. 核心魔法：将 .xcarchive 内的 Runner.app 复制出来，强行包装成符合苹果标准的未签名 .ipa
+      - name: Package Unsigned IPA
+        run: |
+          # 创建 Payload 目录
+          mkdir -p build/ios/ipa/Payload
+          
+          # 将原始应用镜像复制进 Payload 目录
+          cp -r build/ios/archive/Runner.xcarchive/Products/Applications/Runner.app build/ios/ipa/Payload/
+          
+          # 压缩 Payload 文件夹并更名为 .ipa
+          cd build/ios/ipa
+          zip -r ../../../Runner-unsigned.ipa Payload
+          cd ../../..
+
+      # 3. 上传原始 Xcode Archive（解压后是一个 Runner.xcarchive 目录）
+      - name: Upload Raw XCArchive
         uses: actions/upload-artifact@v4
         with:
-          name: ios-build-output
+          name: ios-raw-xcarchive
           path: build/ios/archive/Runner.xcarchive
+
+      # 4. 上传直接可用的未签名 .ipa 安装包
+      - name: Upload Unsigned IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-unsigned-ipa
+          path: Runner-unsigned.ipa
